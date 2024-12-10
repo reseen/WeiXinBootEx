@@ -131,6 +131,13 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="ntdll.h" />
+    <ClInclude Include="resource.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="WeiXinBootEx.rc" />
+  </ItemGroup>
+  <ItemGroup>
+    <Image Include="WeiXinBootEx.ico" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

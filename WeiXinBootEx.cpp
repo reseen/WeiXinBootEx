@@ -5,6 +5,7 @@
 #include <windows.h>
 #include <TlHelp32.h>
 #include <ShlObj.h>
+#include <stdarg.h>
 
 #include "ntdll.h"
 
@@ -31,6 +32,50 @@ typedef struct _NM_INFO
 
 
 /**
+ *	自定义输出函数，格式化宽字符字符串并转换为GBK输出
+ */
+void wprintf_gbk(const wchar_t* format, ...)
+{
+	wchar_t wsFormatted[1024];
+
+	// 变长参数列表
+	va_list args;
+	va_start(args, format);
+	vswprintf(wsFormatted, 1024, format, args);
+	va_end(args);
+
+	// 获取宽字符字符串的长度
+	int len = (int)wcslen(wsFormatted);
+
+	int gbkLength = WideCharToMultiByte(CP_ACP, 0, wsFormatted, len, NULL, 0, NULL, NULL);
+
+	if (gbkLength > 0) {
+		char* gbkStr = new char[gbkLength + 1];
+		WideCharToMultiByte(CP_ACP, 0, wsFormatted, len, gbkStr, gbkLength, NULL, NULL);
+
+		// 输出GBK字符串
+		gbkStr[gbkLength] = '\0';  // 确保字符串以'\0'结尾
+		printf("%s", gbkStr);
+
+		// 释放内存
+		delete[] gbkStr;
+	}
+}
+
+
+/**
+ *	检测文件是否存在
+ */
+BOOL FileExists(PWCHAR filename) {
+	DWORD dwAttrib = GetFileAttributesW(filename);
+
+	// 如果返回 INVALID_FILE_ATTRIBUTES，说明文件不存在
+	return (dwAttrib != INVALID_FILE_ATTRIBUTES && !(dwAttrib & FILE_ATTRIBUTE_DIRECTORY));
+}
+
+
+
+/**
  *	查询系统信息，用于获取文件句柄对应的文件名称，线程中执行，防止卡死
  */
 EXTERN_C DWORD WINAPI GetFileNameThread(PVOID lpParameter)
@@ -43,10 +88,13 @@ EXTERN_C DWORD WINAPI GetFileNameThread(PVOID lpParameter)
 	return 0;
 }
 
+
+
+
 /**
  *	加载程序所需的系统函数
  */
-BOOL loadSystemLibrary() 
+BOOL LoadSystemLibrary() 
 {
 	hNtdllLibrary = LoadLibrary(L"ntdll.dll");
 	if (hNtdllLibrary != NULL) {
@@ -54,7 +102,7 @@ BOOL loadSystemLibrary()
 		NtQuerySystemInformation = (NTQUERYSYSTEMINFORMATION)GetProcAddress(hNtdllLibrary, "NtQuerySystemInformation");
 	}
 	else {
-		std::cout << "动态库 ntdll.dll 相关函数加载失败！" << std::endl;
+		wprintf_gbk(L"动态库 ntdll.dll 相关函数加载失败！");
 		return FALSE;
 	}
 
@@ -64,11 +112,10 @@ BOOL loadSystemLibrary()
 		K32GetModuleFileNameExW = (K32GETMODULEFILENAMEEXW)GetProcAddress(hKernel32Library, "K32GetModuleFileNameExW");
 	}
 	else {
-		std::cout << "动态库 Kernel32.dll 相关函数加载失败！" << std::endl;
+		wprintf_gbk(L"动态库 Kernel32.dll 相关函数加载失败！");
 		return FALSE;
 	}
 
-	std::cout << "动态库加载完成。" << std::endl;
 	return TRUE;
 }
 
@@ -76,23 +123,21 @@ BOOL loadSystemLibrary()
 /**
  *	释放已加载的动态库
  */
-VOID freeSystemLibrary() 
+VOID FreeSystemLibrary() 
 {
 	if (hNtdllLibrary != NULL) {
 		FreeLibrary(hNtdllLibrary);
-		std::cout << "动态库 ntdll.dll 已释放！" << std::endl;
 	}
 
 	if (hKernel32Library != NULL) {
 		FreeLibrary(hKernel32Library);
-		std::cout << "动态库 Kernel32.dll 已释放！" << std::endl;
 	}
 }
 
 /**
  * 为当前进程启用 SE_DEBUG_NAME 特权,以访问其他进程的句柄
  */
-BOOL adjustPrivilege()
+BOOL AdjustPrivilege()
 {
 	BOOL bResult = FALSE;
 
@@ -105,7 +150,7 @@ BOOL adjustPrivilege()
 
 		if (LookupPrivilegeValue(NULL, SE_DEBUG_NAME, &tp.Privileges[0].Luid)){
 			bResult = AdjustTokenPrivileges(hToken, FALSE, &tp, sizeof(tp), NULL, NULL);
-			std::cout << (bResult ? "提权成功" : "提权失败") << std::endl;
+			wprintf_gbk(L"提权%s\r\n", (bResult ? L"成功" : L"失败"));
 		}
 		CloseHandle(hToken);
 	}
@@ -115,7 +160,7 @@ BOOL adjustPrivilege()
 /**
  * 进程 rundll32.exe 会阻止解除文件占用操作，所以解除前先终止掉该进程
  */
-BOOL closeBlockingProcess(void)
+BOOL CloseBlockingProcess(void)
 {
 	HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
 
@@ -127,8 +172,6 @@ BOOL closeBlockingProcess(void)
 		if (wcscmp(pe.szExeFile, L"rundll32.exe") == 0) {
 			HANDLE hOpen = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pe.th32ProcessID);
 			TerminateProcess(hOpen, 0);
-
-			std::cout << "成功终止 rundll32.exe 进程" << std::endl;
 			return TRUE;
 		}
 		bMore = Process32Next(hSnapshot, &pe);
@@ -182,14 +225,13 @@ UCHAR getFileHandleType(PSYSTEM_HANDLE_INFORMATION pInfo, HANDLE hFile)
 		for (ULONG i = 0; i < pInfo->uCount; i++) {
 			if ((HANDLE)pInfo->aSH[i].Handle == hFile && pInfo->aSH[i].uIdProcess == GetCurrentProcessId()) {
 				uResult = pInfo->aSH[i].ObjectType;
-				std::cout << "成功获取文件对象值 uResult = " << std::hex << std::showbase << int(uResult) << std::endl;
 				break;
 			}
 		}
 		CloseHandle(hFile);
 	}
 	else {
-		std::cout << "未成功获取文件对象值 last err = " << GetLastError() << std::endl;
+		wprintf_gbk(L"未成功获取文件对象值 lasterr = %d", GetLastError());
 	}
 	return uResult;
 }
@@ -212,7 +254,6 @@ ULONG getWeixinPID(ULONG* pPid)
 		do {
 			if (wcscmp(pe.szExeFile, L"Weixin.exe") == 0) {
 				pPid[nPid] = pe.th32ProcessID;
-				std::cout << "weixin,exe index = " << (nPid + 1) << "pid = " << pPid[nPid] << std::endl;
 				nPid++;
 			}
 		} while (Process32Next(hSnapshot, &pe));
@@ -226,7 +267,7 @@ ULONG getWeixinPID(ULONG* pPid)
 /**
  *	通过句柄获取文件名称
  */
-void getFileName(HANDLE hFile, WCHAR* TheName)
+void GetFileName(HANDLE hFile, WCHAR* TheName)
 {
 	HANDLE hThread = NULL;
 
@@ -238,8 +279,8 @@ void getFileName(HANDLE hFile, WCHAR* TheName)
 		hThread = CreateThread(NULL, 0, GetFileNameThread, Info, 0, NULL);
 		if (hThread) {
 			if (WaitForSingleObject(hThread, 1000) == WAIT_TIMEOUT) {
-				
-				TerminateThread(hThread, 0);		// 超时后终止查询，防止卡死
+				// 超时后终止查询，防止卡死
+				TerminateThread(hThread, 0);		
 			}
 			CloseHandle(hThread);
 		}
@@ -256,7 +297,7 @@ void getFileName(HANDLE hFile, WCHAR* TheName)
 /**
  *	通过句柄和文件名称，获取文件当前所在的磁盘盘符
  */
-BOOL getVolume(HANDLE hFile, PWCHAR Name)
+BOOL GetVolume(HANDLE hFile, PWCHAR Name)
 {
 	DWORD dwSize = MAX_PATH;
 	WCHAR szLogicalDrives[MAX_PATH] = { 0 };
@@ -293,38 +334,101 @@ BOOL getVolume(HANDLE hFile, PWCHAR Name)
 }
 
 
-int main()
+/**
+ *	关闭远程句柄，解除文件占用
+ */
+BOOL CloseRemoteHandle(__in DWORD dwProcessId, __in HANDLE hRemoteHandle)
 {
-	WCHAR wsLockPath[MAX_PATH] = { 0 };
+	HANDLE hExecutHandle = NULL;
+	BOOL bFlag = FALSE;
+	HANDLE hProcess = NULL;
+	HMODULE hKernel32Module = NULL;
 
-	// 获取 Roaming 路径
+	hProcess = OpenProcess(PROCESS_CREATE_THREAD | PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ, FALSE, dwProcessId);
+
+	if (NULL == hProcess) {
+		bFlag = FALSE;
+		goto ExitFlag;
+	}
+
+	hKernel32Module = LoadLibrary(L"kernel32.dll ");
+
+	hExecutHandle = CreateRemoteThread(hProcess, 0, 0,
+		(DWORD(__stdcall*)(void*))GetProcAddress(hKernel32Module, "CloseHandle"),
+		hRemoteHandle, 0, NULL);
+
+	if (NULL == hExecutHandle) {
+		bFlag = FALSE;
+		goto ExitFlag;
+	}
+
+	if (WaitForSingleObject(hExecutHandle, 2000) == WAIT_OBJECT_0) {
+		bFlag = TRUE;
+		goto ExitFlag;
+	}
+	else {
+		bFlag = FALSE;
+		goto ExitFlag;
+	}
+
+ExitFlag:
+	if (hExecutHandle != NULL) {
+		CloseHandle(hExecutHandle);
+	}
+
+	if (hProcess != NULL) {
+		CloseHandle(hProcess);
+	}
+
+	if (hKernel32Module != NULL) {
+		FreeLibrary(hKernel32Module);
+	}
+	return bFlag;
+}
+
+
+/**
+ *	获取 Lock.ini 文件路径
+ */
+PWCHAR GetLockIni()
+{
+	static WCHAR wsLockPath[MAX_PATH] = { 0 };
+	
 	PWSTR wsRoamingPath = NULL;
-	HRESULT hr = SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, NULL, &wsRoamingPath);
+	HRESULT hr = SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, NULL, &wsRoamingPath);		// 获取 Roaming 路径
 
-	// 获取微信 4.0 互斥文件路径
 	if (SUCCEEDED(hr)) {
-		swprintf(wsLockPath, MAX_PATH, L"%s\\Tencent\\xwechat\\lock\\lock.ini", wsRoamingPath);
+		swprintf(wsLockPath, MAX_PATH, L"%s\\Tencent\\xwechat\\lock\\lock.ini", wsRoamingPath);	// 获取微信 4.0 互斥文件路径
 		CoTaskMemFree(wsRoamingPath);
 	}
 	else {
-		wprintf(L"Roaming 路径获取错误。\r\n");
-		return 0;
+		wprintf_gbk(L"Roaming 路径获取错误。\r\n");
+		return NULL;
 	}
 
-	wprintf(L"Lock File: %s\r\n", wsLockPath);
+	return wsLockPath;
+}
+
+
+/**
+ *	解除微信 Lock.ini 文件占用并删除
+ */
+INT UnlockWeixinMutex(PWCHAR wsLockPath)
+{
+	WCHAR wsModuleFilePath[MAX_PATH] = { 0 };
 
 	// 加载程序所需动态库
-	if (!loadSystemLibrary()) {
-		return 0;
+	if (!LoadSystemLibrary()) {
+		return -1;
 	}
 	
 	// 提权至 SE_DEBUG_NAME
-	if (!adjustPrivilege()) {
-		return 0;
+	if (!AdjustPrivilege()) {
+		return -1;
 	}
 
 	// 关闭 rundll32.exe 进程
-	closeBlockingProcess();
+	CloseBlockingProcess();
 
 	hHeap = GetProcessHeap();
 
@@ -334,7 +438,7 @@ int main()
 	// 获取系统信息表
 	PSYSTEM_HANDLE_INFORMATION pInfo = (PSYSTEM_HANDLE_INFORMATION)getInfoTable(SystemHandleInformation);
 	if (!pInfo) {
-		return 0;
+		return -1;
 	}
 
 	// 获取文件句柄类型
@@ -347,8 +451,6 @@ int main()
 
 	WCHAR  wsFilePath[MAX_PATH] = { 0 };
 	WCHAR  wsFileVolumePath[MAX_PATH] = { 0 };
-
-	std::cout << "weixinPidListLen:" << weixinPidListLen << std::endl;
 
 	for (ULONG i = 0; i < pInfo->uCount; i++) {
 		// 检索微信进程
@@ -368,28 +470,122 @@ int main()
 			HANDLE hFile;
 			HANDLE hProcess = OpenProcess(PROCESS_DUP_HANDLE, FALSE, pInfo->aSH[i].uIdProcess);
 
-			if (hProcess) {
-				//先复制到本地句柄表
-				if (DuplicateHandle(hProcess, (HANDLE)pInfo->aSH[i].Handle, GetCurrentProcess(), &hFile, 0, FALSE, DUPLICATE_SAME_ACCESS)) {
+			if (!hProcess) {
+				continue;
+			}
 
-					getFileName(hFile, wsFilePath);
-					if (getVolume(hFile, wsFileVolumePath)) {
-						wcscat_s(wsFileVolumePath, wsFilePath);
+			// 成功获取到目标文件句柄后，先复制到本地句柄表
+			if (DuplicateHandle(hProcess, (HANDLE)pInfo->aSH[i].Handle, GetCurrentProcess(), &hFile, 0, FALSE, DUPLICATE_SAME_ACCESS)) {
 
-						if (wcscmp(wsLockPath, wsFileVolumePath) == 0) {
-							wprintf(L"wsFileVolumePath: %s\r\n", wsFileVolumePath);
-							break;
+				GetFileName(hFile, wsFilePath);
+				// wprintf_gbk(L"wsFilePath: %s\r\n", wsFilePath);
+
+				if (GetVolume(hFile, wsFileVolumePath)) {
+					wcscat_s(wsFileVolumePath, wsFilePath);
+
+					if (wcscmp(wsLockPath, wsFileVolumePath) == 0) {
+						// wprintf_gbk(L"wsFileVolumePath: %s\r\n", wsFileVolumePath);
+
+						HANDLE hPid = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pInfo->aSH[i].uIdProcess);
+						K32GetModuleFileNameExW(hPid, NULL, wsModuleFilePath, MAX_PATH);
+						// wprintf_gbk(L"文件占用程序：%s\r\n", wsModuleFilePath);
+
+						// 关闭远程句柄
+						if (CloseRemoteHandle(pInfo->aSH[i].uIdProcess, (HANDLE)pInfo->aSH[i].Handle)) {
+
+							// 关闭本地句柄，解除文件占用
+							CloseHandle(hFile);
+
+							// 删除文件
+							//wprintf_gbk(L"开始删除文件：%s\\rn", wsFileVolumePath);
+							if (DeleteFile(wsFileVolumePath)) {
+								wprintf_gbk(L"解除占用成功!\r\n");
+							}
+							else {
+								wprintf_gbk(L"解除占用失败!\r\n");
+							}
 						}
+						else {
+							// 继续遍历，也许有其他占用句柄
+							continue;
+						}
+						CloseHandle(hPid);
+						break;
 					}
 				}
 			}
 		}
 	}
 
+	DeleteFile(L"boot.ex");
 	HeapFree(hHeap, 0, pInfo);
-	freeSystemLibrary();
+	FreeSystemLibrary();
 	return 0;
 }
+
+
+/**
+ *	获取微信主程序文件位置
+ */
+
+PWCHAR GetWeixinInstallPath()
+{
+	LPCWSTR keyPath = L"SOFTWARE\\Tencent\\Weixin";
+	static WCHAR swWeixinPath[MAX_PATH] = { 0 };
+
+	HKEY hKey;
+	LONG openResult = RegOpenKeyEx(HKEY_CURRENT_USER, keyPath, 0, KEY_ALL_ACCESS, &hKey);
+
+	if (openResult == ERROR_SUCCESS) {
+		DWORD valueSize = MAX_PATH;
+		LONG queryResult = RegQueryValueEx(hKey, L"InstallPath", NULL, NULL, (LPBYTE)swWeixinPath, &valueSize);
+		if (queryResult == ERROR_SUCCESS) {
+			RegCloseKey(hKey);
+			return swWeixinPath;
+		}
+		else {
+			wprintf_gbk(L"无法读取注册表值");
+		}
+	}
+	else {
+		wprintf_gbk(L"无法打开注册表键");
+	}
+	RegCloseKey(hKey);
+	return NULL;
+}
+
+
+int main()
+{
+	PWCHAR pwsLockIniPath = GetLockIni();
+	PWCHAR pwsWeiXinPath = GetWeixinInstallPath();
+
+	// 首先检测 Lock.ini 是否存在
+	if (FileExists(pwsLockIniPath)) {
+
+		// 如果存在先删除一次试试，无法删除的情况下再尝试解除占用
+		if (!DeleteFile(pwsLockIniPath)) {
+
+			// 解除文件占用
+			wprintf_gbk(L"尝试解除占用…\r\n");
+			UnlockWeixinMutex(pwsLockIniPath);
+		}
+	}
+
+	if (!pwsWeiXinPath) {
+		system("pause");
+		return 0;
+	}
+
+	if (!wcscat_s(pwsWeiXinPath, MAX_PATH, L"\\Weixin.exe")) {
+		wprintf_gbk(L"启动微信:%s\r\n", pwsWeiXinPath);
+		ShellExecute(NULL, NULL, pwsWeiXinPath, NULL, NULL, SW_NORMAL);
+	}
+
+	system("pause");
+	return 0;
+}
+
 
 // 运行程序: Ctrl + F5 或调试 >“开始执行(不调试)”菜单
 // 调试程序: F5 或调试 >“开始调试”菜单
